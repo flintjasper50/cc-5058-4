@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>营地居民效用决策沙盘</title>
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">营</span>
+    <div>
+      <h1>营地居民效用决策沙盘</h1>
+      <p>需求 → 效用 · 可行性 · 执行成本 → 行动 → 状态改变；每一步可回放</p>
+    </div>
+  </div>
+  <div class="top-status">
+    <span id="tick-seconds" class="pill">10s/拍</span>
+    <span id="status" class="pill">暂停 · t=0</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage card">
+    <div class="stage-head">
+      <h2>营地</h2>
+      <div class="stage-tools">
+        <button id="play" class="btn primary" type="button">播放</button>
+        <button id="step" class="btn" type="button">单拍</button>
+        <button id="run-60" class="btn" type="button">跑 60 拍</button>
+        <button id="reset" class="btn ghost" type="button">重置</button>
+        <label class="speed">
+          速度 <input id="speed" type="range" min="0.3" max="4" step="0.1" value="1" />
+          <output id="speed-out">1.0×</output>
+        </label>
+      </div>
+    </div>
+    <div class="svg-wrap">
+      <svg id="scene" viewBox="0 0 1000 700" role="img" aria-label="营地场景"></svg>
+    </div>
+    <div class="replay">
+      <label for="replay-range">决策回放</label>
+      <input id="replay-range" type="range" min="1" max="1" value="1" />
+      <span id="replay-label" class="pill">直播 t=0</span>
+      <button id="replay-live" class="btn small" type="button">回到直播</button>
+      <button id="trace-export" class="btn small ghost" type="button">导出可重放轨迹</button>
+    </div>
+    <div class="scenarios">
+      <span class="label">场景</span>
+      <div id="scenarios" class="chips"></div>
+    </div>
+  </section>
+
+  <aside class="side">
+    <section class="card residents">
+      <h2>居民</h2>
+      <div id="residents" class="resident-list"></div>
+      <div class="spark">
+        <canvas id="sparkline" width="360" height="90"></canvas>
+        <span class="hint">所选居民四维需求走势（橙饥饿 / 紫疲劳 / 绿社交 / 黄任务）</span>
+      </div>
+    </section>
+
+    <section class="card controls">
+      <h2>改变需求并影响下一拍</h2>
+      <div class="inspect-tabs">
+        <span id="inspect-alt" class="muted"></span>
+        <div class="tabs">
+          <button data-inspect="lin" type="button">林舟</button>
+          <button data-inspect="qi" type="button">祁雾</button>
+          <button data-inspect="shan" type="button">山岚</button>
+        </div>
+      </div>
+      <div class="need-slider">
+        <label for="need-hunger">饥饿</label>
+        <input id="need-hunger" data-need="hunger" type="range" min="0" max="100" step="1" value="50" />
+        <output data-need-out="hunger">50</output>
+      </div>
+      <div class="need-slider">
+        <label for="need-fatigue">疲劳</label>
+        <input id="need-fatigue" data-need="fatigue" type="range" min="0" max="100" step="1" value="35" />
+        <output data-need-out="fatigue">35</output>
+      </div>
+      <div class="need-slider">
+        <label for="need-social">社交</label>
+        <input id="need-social" data-need="social" type="range" min="0" max="100" step="1" value="45" />
+        <output data-need-out="social">45</output>
+      </div>
+      <div class="need-slider">
+        <label for="need-taskLoad">任务压力</label>
+        <input id="need-taskLoad" data-need="taskLoad" type="range" min="0" max="100" step="1" value="45" />
+        <output data-need-out="taskLoad">45</output>
+      </div>      <div class="action-grid">
+        <button id="greet" class="btn small" type="button">转身接待来客</button>
+        <button id="handoff" class="btn small" type="button">交接餐盘给同伴</button>
+        <button id="give-visitor" class="btn small" type="button">把餐给来客</button>
+        <button id="cancel-dining" class="btn small" type="button">取消就餐预约</button>
+        <button id="cancel-companion" class="btn small" type="button">取消同伴预约</button>
+        <button id="add-visitor" class="btn small ghost" type="button">新增来客（下一拍抵达）</button>
+        <button id="trigger-emergency" class="btn small ghost" type="button">触发紧急任务</button>
+      </div>
+      <div class="reassign">
+        <label for="reassign-target">改派到</label>
+        <select id="reassign-target">
+          <option value="rest">休息</option>
+          <option value="eat">取食就餐</option>
+          <option value="socialize">交谈</option>
+          <option value="work">工作</option>
+        </select>
+        <button id="reassign" class="btn small" type="button">执行改派</button>
+      </div>
+      <div class="fail-toggles">
+        <span class="label">设施失效切换</span>
+        <button id="fail-pot" class="chip" type="button">灶台</button>
+        <button id="fail-fire" class="chip" type="button">篝火</button>
+        <button id="fail-work" class="chip" type="button">工坊</button>
+      </div>
+      <p id="action-feedback" class="feedback"></p>
+    </section>
+  </aside>
+
+  <section class="card evaluation">
+    <h2>本拍求值：效用 / 可行性 / 成本</h2>
+    <div id="evaluation"></div>
+  </section>
+
+  <section class="card evidence">
+    <h2>承诺与餐份去向</h2>
+    <div id="verdict"></div>
+    <div class="evidence-tools">
+      <button id="verify" class="btn small" type="button">核验房主承诺</button>
+    </div>
+  </section>
+
+  <section class="card stats">
+    <h2>运行指标</h2>
+    <div id="stats" class="stat-grid"></div>
+    <p class="stat-note">当前最高饥饿 <strong id="max-hunger">—</strong>（用于比较迟滞/承诺对饥饿上界的影响）</p>
+  </section>
+
+  <section class="card comparison-card">
+    <h2>策略比较</h2>
+    <div class="tune-grid">
+      <label>迟滞强度 <input id="tune-hyst" type="range" min="0" max="0.3" step="0.01" value="0.12" /><output id="tune-hyst-out">0.12</output></label>
+      <label>切换代价 <input id="tune-switch" type="range" min="0" max="0.25" step="0.01" value="0.08" /><output id="tune-switch-out">0.08</output></label>
+      <label>承诺时窗（拍） <input id="tune-commit" type="range" min="0" max="30" step="1" value="10" /><output id="tune-commit-out">10</output></label>
+      <label class="inline"><input id="tune-commit-on" type="checkbox" checked /> 启用承诺窗口</label>
+    </div>
+    <button id="compare" class="btn small" type="button">用当前参数比较：无迟滞 / 仅迟滞 / 仅承诺（阈值场景，各 80 拍）</button>
+    <div id="comparison"></div>
+  </section>
+
+  <section class="card events-card">
+    <h2>决策与事件流</h2>
+    <div id="events" class="event-list"></div>
+  </section>
+</main>
+
+<footer class="foot">
+  <p>内核为确定性纯函数：无随机、无系统时钟。界面每拍调用 <code>step()</code>，所有分数来自同一场景状态；回放滑块读取已记录的帧。</p>
+  <p>启动：<code>python3 -m http.server 8080</code>，打开 <code>http://localhost:8080/</code>；或 <code>npx serve .</code>。</p>
+</footer>
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>

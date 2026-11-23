@@ -1,0 +1,28 @@
+{
+  "name": "workspace",
+  "version": "1.0.0",
+  "description": "虚拟营地居民效用决策沙盘：需求→效用/可行性/成本→行动→状态改变，可回放。",
+  "type": "module",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "node --test tests/model.test.js",
+    "serve": "python3 -m http.server 8080"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flintjasper50/cc-5058-4.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/flintjasper50/cc-5058-4/issues"
+  },
+  "homepage": "https://github.com/flintjasper50/cc-5058-4#readme",
+  "devDependencies": {
+    "playwright": "^1.49.1"
+  }
+}
