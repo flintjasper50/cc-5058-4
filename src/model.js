@@ -24,6 +24,11 @@ export const DEFAULT_CONFIG = Object.freeze({
   hysteresisFloor: 0.012,
   promiseBonus: 0.16,
   switchCost: 0.08,
+  // Re-selection margin while an action is underway: a different activity only
+  // replaces the current one once its effective score is ahead by at least this
+  // much. It is an inertia test, not a lock — when the action finishes (or
+  // becomes infeasible) the resident re-evaluates freely every tick.
+  switchMargin: 0.08,
   commitmentTicks: { rest: 10, eat: 12, socialize: 6, work: 9, greet: 3, emergency: 6 },
   commitOnStart: true,
   travelCostPerTile: 0.06,
@@ -142,6 +147,7 @@ function resident(id, name, x, y, needs) {
     consecutiveTicks: 0,
     satiation: { rest: 0, eat: 0, socialize: 0 },
     promise: null,
+    failedAtTick: -1,
     log: [],
     lastEvaluation: null,
   };
@@ -234,7 +240,12 @@ export function utilityFor(state, r, activityId) {
   } else if (activityId === 'socialize') {
     add('social', '满足社交', n.social, c.weights.socialize);
     const waitingVisitor = state.visitors.find((v) => v.state === 'at_gate' || v.state === 'waiting_queue');
-    if (waitingVisitor && r.carrying === 0 && !r.seat) {
+    // Only a resident who actually has the greet option may collect the
+    // hospitality pull; otherwise an un-greetable visitor would inflate the
+    // socialize score and fake a utility reversal at the threshold.
+    const canGreet = waitingVisitor && r.carrying === 0 && !r.seat
+      && (waitingVisitor.promisedBy === r.id || n.social >= 55);
+    if (canGreet) {
       parts.push({ key: 'visitor', label: `接待${waitingVisitor.name}`, need: 100, weight: 0.18, raw: 1, contribution: 0.18 });
     }
   } else if (activityId === 'work') {
@@ -473,15 +484,17 @@ function consider(state, r, opts) {
   // Every option is evaluated every tick. An active commitment additionally
   // delays a switch to a marginally better option (or blocks it outright when
   // `commitOnStart` is on) without hiding the freshly computed scores.
-  state.decisions[r.id] = compactEvaluation(ev);
-  if (r.commitment.activity === r.activity && state.tick < r.commitment.until) {
-    ev.commitmentActive = true;
-  }
   const holdReason = reconsiderReason(state, r);
   const holdings = holdReason === null && !opts.forceDecision && !opts.forceReconsider;
   r.lastEvaluation = ev;
   ev.held = holdings;
   ev.reason = holdings ? `承诺窗口至 t=${r.commitment.until}，本拍继续` : (holdReason || '重新求值');
+  // Compact after the held/reason flags are set so the recorded decision and
+  // the UI show whether inertia or a commitment window kept the action.
+  state.decisions[r.id] = compactEvaluation(ev);
+  if (r.commitment.activity === r.activity && state.tick < r.commitment.until) {
+    ev.commitmentActive = true;
+  }
   if (holdings) {
     return { ev, switched: false, held: true };
   }
@@ -495,10 +508,33 @@ function consider(state, r, opts) {
     return { ev, switched: false, held: false };
   }
   if (r.action.phase === 'idle') {
+    // A failure must not instantly re-select the activity that just failed on
+    // the same tick (that loop re-created reservations and double-counted
+    // failures). One explicit cooldown tick; afterwards evaluation is free.
+    if (r.failedAtTick === state.tick) {
+      ev.held = true;
+      ev.reason = `本拍行动失败（${r.action.blocked || '条件不满足'}），冷却一拍后再重新求值`;
+      state.decisions[r.id] = compactEvaluation(ev);
+      return { ev, switched: false, held: true };
+    }
     startActivity(state, r, best, ev);
     return { ev, switched: true, held: false };
   }
   if (best !== r.activity) {
+    // Inertia gate: an action already underway is not abandoned on a hairline
+    // score reversal. The alternative must clear both the fixed switch cost and
+    // an explicit margin over the current activity; feasibility changes and
+    // emergencies still force the switch via reconsiderReason above.
+    const currentRow = ev.rows.find((row) => row.activity === r.activity);
+    const bestRow = ev.rows.find((row) => row.activity === best);
+    const currentEffective = currentRow && currentRow.feasible ? currentRow.effective : -Infinity;
+    const gap = bestRow.effective - currentEffective;
+    if (gap < state.config.switchMargin) {
+      ev.held = true;
+      ev.reason = `惯性保持：${ACTIVITY[best].label}仅领先 ${r2(gap, 3)}，未达改派边际 ${state.config.switchMargin}`;
+      state.decisions[r.id] = compactEvaluation(ev);
+      return { ev, switched: false, held: true };
+    }
     abandonAction(state, r, `改选${ACTIVITY[best].label}（${ev.reason}）`);
     startActivity(state, r, best, ev);
     return { ev, switched: true, held: false };
@@ -521,6 +557,7 @@ export function startActivity(state, r, activityId, ev = null) {
     state.metrics.switches += 1;
   }
   if (prev !== activityId) r.consecutiveTicks = 0;
+  r.failedAtTick = -1;
   r.activity = activityId;
   r.activityLabel = ACTIVITY[activityId].label;
   if (activityId === 'greet') {
@@ -840,6 +877,10 @@ export function failAction(state, r, reason) {
   const kind = r.activity;
   const carrying = r.carrying;
   leaveQueue(state, r);
+  // releaseSeat only clears the table the resident sits at; a reservation made
+  // while travelling/queuing (seat is still null) must be revoked too, or the
+  // table keeps counting a diner who already left and a real diner loses a seat.
+  releaseReservation(state, r);
   if (r.seat) releaseSeat(state, r);
   if (carrying > 0) {
     state.metrics.platesWasted += carrying;
@@ -851,6 +892,7 @@ export function failAction(state, r, reason) {
   else r.needs.social = clamp(r.needs.social + 2);
   state.metrics.failures += 1;
   r.action = idleAction({ outcome: 'fail', blocked: reason });
+  r.failedAtTick = state.tick;
   r.commitment = { activity: null, until: 0 };
   logEvent(state, r, 'fail', `${r.name}的${ACTIVITY[kind] ? ACTIVITY[kind].label : kind}行动失败：${reason}`);
 }
@@ -999,6 +1041,14 @@ export function releaseSeat(state, r) {
     table.reservations = table.reservations.filter((id) => id !== r.id);
   }
   r.seat = null;
+}
+
+// Drop only the reservation claim, keeping an occupied seat untouched. Used by
+// the failure paths that run before the resident ever sat down.
+export function releaseReservation(state, r) {
+  for (const t of TABLES) {
+    state.tables[t].reservations = state.tables[t].reservations.filter((id) => id !== r.id);
+  }
 }
 
 export function leaveQueue(state, r) {
@@ -1534,6 +1584,7 @@ export function applyScenario(state, id) {
     r.consecutiveTicks = 0;
     r.satiation = { rest: 0, eat: 0, socialize: 0 };
     r.promise = null;
+    r.failedAtTick = -1;
     r.lastSwitchTick = 0;
     r.log = [];
   }

@@ -9,7 +9,9 @@
   },
   "scripts": {
     "test": "node --test tests/model.test.js",
-    "serve": "python3 -m http.server 8080"
+    "test:e2e": "node tests/e2e.ui.mjs",
+    "serve": "python3 -m http.server 8080",
+    "utility": "node src/cli.mjs"
   },
   "repository": {
     "type": "git",

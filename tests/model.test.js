@@ -6,7 +6,6 @@ import {
   setNeed, spawnEmergency, setFacility, comparePolicies, optionsFor, frameAt, DEFAULT_CONFIG,
   handPlateToVisitor,
 } from '../src/model.js';
-
 function fresh(id) {
   return applyScenario(createState(), id);
 }
@@ -280,4 +279,165 @@ test('needs can be edited and drive the next evaluation', () => {
   setNeed(s, 'shan', 'hunger', 99);
   const after = utilityFor(s, s.residents[2], 'eat').total;
   assert.ok(after > before);
+});
+
+// --- Activity jitter / inertia regression suite ------------------------------
+
+function bareKernel(s) {
+  s.config.commitOnStart = false;
+  s.config.hysteresisBase = 0;
+  s.config.hysteresisFloor = 0;
+  s.config.switchCost = 0;
+  s.config.promiseBonus = 0;
+  s.facilities.pot.stock = 20;
+  for (const other of s.residents.slice(1)) {
+    other.needs = { hunger: 5, fatigue: 5, social: 5, taskLoad: 5 };
+  }
+}
+
+test('hairline need reversals do not interrupt an action every tick', () => {
+  const s = fresh('equal-mealtime');
+  bareKernel(s);
+  const r = s.residents[0];
+  r.needs = { hunger: 55, fatigue: 10, social: 55, taskLoad: 10 };
+  for (let t = 0; t < 24; t += 1) {
+    const wobble = t % 2 === 0 ? 3 : -3;
+    setNeed(s, r.id, 'hunger', 55 + wobble);
+    setNeed(s, r.id, 'social', 55 - wobble);
+    step(s);
+  }
+  assert.equal(s.metrics.interrupts, 0, 'no action is abandoned on a hairline reversal');
+  assert.equal(s.metrics.flips, 0, 'no back-and-forth flapping');
+  assert.ok(s.metrics.mealsServed >= 1, 'the resident actually finishes a meal instead of travelling forever');
+});
+
+test('inertia holds on a small gap but yields when the alternative is decisively better', () => {
+  const s = fresh('equal-mealtime');
+  bareKernel(s);
+  const r = s.residents[0];
+  setNeed(s, r.id, 'hunger', 90);
+  setNeed(s, r.id, 'social', 10);
+  step(s);
+  assert.equal(r.activity, 'eat');
+  // Small reversal where socialize narrowly leads: held by the inertia margin.
+  setNeed(s, r.id, 'hunger', 52);
+  setNeed(s, r.id, 'social', 58);
+  step(s);
+  assert.equal(r.activity, 'eat', 'a marginal alternative must not pull the resident away mid-action');
+  assert.equal(s.decisions[r.id].best, 'socialize');
+  assert.equal(s.decisions[r.id].held, true);
+  // Decisive reversal: the margin gate must not lock the activity.
+  setNeed(s, r.id, 'hunger', 10);
+  setNeed(s, r.id, 'social', 98);
+  step(s);
+  assert.equal(r.activity, 'socialize', 'a clearly better activity still wins');
+});
+
+test('inertia is not a lock: a finished action re-evaluates freely the next tick', () => {
+  const s = fresh('equal-mealtime');
+  bareKernel(s);
+  const r = s.residents[0];
+  r.needs = { hunger: 85, fatigue: 10, social: 50, taskLoad: 10 };
+  advance(s, 30);
+  assert.ok(s.metrics.mealsServed >= 1, 'the meal completes');
+  setNeed(s, r.id, 'hunger', 10);
+  setNeed(s, r.id, 'social', 99);
+  step(s);
+  assert.equal(r.activity, 'socialize', 'after completion the resident is not locked to eat');
+});
+
+test('a queue failure releases the table reservation instead of leaving a ghost seat', () => {
+  const s = fresh('equal-mealtime');
+  s.config.queueLeadTicks = 999;
+  s.config.patienceTicks = 3;
+  s.facilities.pot.stock = 20;
+  for (const r of s.residents) r.needs = { hunger: 5, fatigue: 5, social: 5, taskLoad: 5 };
+  setNeed(s, 'lin', 'hunger', 95);
+  advance(s, 9);
+  const lin = s.residents[0];
+  assert.equal(lin.action.outcome, 'fail');
+  const claimed = [...s.tables.tableA.reservations, ...s.tables.tableB.reservations];
+  assert.ok(!claimed.includes('lin'), 'the failed diner no longer holds any reservation');
+  // Nominal capacity is 4 seats across two tables; the ghost must not consume one.
+  const used = new Set([
+    ...s.tables.tableA.occupants, ...s.tables.tableA.reservations,
+    ...s.tables.tableB.occupants, ...s.tables.tableB.reservations,
+  ]).size;
+  assert.equal(used, 0, 'no table capacity is occupied after the failure');
+});
+
+test('a failure is counted once and the resident retries on a later tick, not the same one', () => {
+  const s = fresh('equal-mealtime');
+  s.config.queueLeadTicks = 999;
+  s.config.patienceTicks = 3;
+  s.facilities.pot.stock = 20;
+  for (const r of s.residents) r.needs = { hunger: 5, fatigue: 5, social: 5, taskLoad: 5 };
+  setNeed(s, 'lin', 'hunger', 95);
+  advance(s, 9);
+  assert.equal(s.metrics.failures, 1, 'the patience failure is booked a single time');
+  const lin = s.residents[0];
+  assert.equal(lin.failedAtTick, s.tick, 'the cooldown timestamp marks the failing tick');
+  advance(s, 1);
+  assert.ok(lin.failedAtTick < s.tick, 'after the cooldown tick the resident is free to retry');
+});
+
+test('an in-transit visitor gives no utility, and an un-greetable arrived visitor does not inflate socialize', () => {
+  const s = fresh('equal-mealtime');
+  const r = s.residents[0];
+  r.needs = { hunger: 30, fatigue: 30, social: 30, taskLoad: 30 };
+  spawnVisitor(s, { name: '路上来客', hunger: 80 });
+  const beforeArrival = utilityFor(s, r, 'socialize');
+  assert.ok(!beforeArrival.parts.some((p) => p.key === 'visitor'), 'an incoming visitor contributes nothing');
+  step(s); // visitor reaches the gate; resident has social 30 (<55) and no promise
+  assert.equal(s.visitors[0].state, 'at_gate');
+  const afterArrival = evaluate(s, r);
+  assert.ok(!afterArrival.rows.some((row) => row.activity === 'greet'), 'resident has no greet option');
+  const socialize = afterArrival.rows.find((row) => row.activity === 'socialize');
+  assert.ok(!socialize.parts.some((p) => p.key === 'visitor'),
+    'a visitor the resident cannot greet must not add a phantom socialize bonus');
+});
+
+test('a resident who can greet still receives the visitor utility pull', () => {
+  const s = fresh('equal-mealtime');
+  const r = s.residents[0];
+  r.needs = { hunger: 30, fatigue: 30, social: 60, taskLoad: 30 };
+  spawnVisitor(s, { name: '来客' });
+  s.visitors[0].state = 'at_gate';
+  s.visitors[0].stateSince = s.tick;
+  const ev = evaluate(s, r);
+  assert.ok(ev.rows.some((row) => row.activity === 'greet' && row.feasible));
+  const socialize = ev.rows.find((row) => row.activity === 'socialize');
+  assert.ok(socialize.parts.some((p) => p.key === 'visitor'), 'an eligible resident keeps the hospitality pull');
+});
+
+test('the same desire trajectory switches far less with the inertia repair', () => {
+  const zero = { rest: 0, eat: 0, socialize: 0, work: 0, greet: 0, emergency: 0 };
+  const base = fresh('threshold');
+  const [bare] = comparePolicies(base, [
+    { id: 'bare', label: 'bare', config: { commitOnStart: false, hysteresisBase: 0, hysteresisFloor: 0, switchCost: 0, promiseBonus: 0, commitmentTicks: zero } },
+  ], 80);
+  assert.equal(bare.flips, 0, 'the bare policy no longer oscillates every few ticks');
+  assert.ok(bare.switches <= 14, `switch count stays bounded, got ${bare.switches}`);
+  assert.ok(bare.maxHunger >= 80 && bare.maxHunger <= 86, `hunger ceiling stays in the same band, got ${bare.maxHunger}`);
+});
+
+test('a completed effect is never applied twice through re-selection', () => {
+  const s = fresh('equal-mealtime');
+  bareKernel(s);
+  const r = s.residents[0];
+  r.needs = { hunger: 85, fatigue: 60, social: 50, taskLoad: 50 };
+  let prevHunger = r.needs.hunger;
+  const reliefEvents = [];
+  for (let t = 0; t < 40; t += 1) {
+    step(s);
+    if (r.action.outcome === 'complete' && r.activity === 'idle') {
+      setNeed(s, r.id, 'social', 99);
+      setNeed(s, r.id, 'hunger', 10);
+    }
+    const drop = prevHunger - r.needs.hunger;
+    if (drop > 5) reliefEvents.push(Math.round(drop * 100) / 100);
+    prevHunger = r.needs.hunger;
+  }
+  assert.equal(reliefEvents.length, s.metrics.mealsServed, 'each hunger relief maps to exactly one served meal');
+  for (const d of reliefEvents) assert.ok(d <= s.config.relief.eat + 2, 'no single tick applies a doubled meal effect');
 });
